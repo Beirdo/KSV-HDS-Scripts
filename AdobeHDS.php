@@ -12,6 +12,10 @@
   define('FRAMEFIX_STEP', 40);
   define('INVALID_TIMESTAMP', -1);
   define('STOP_PROCESSING', 2);
+  // php 5.3.2 libcurl/7.19.7 ubuntu 10  
+  if(!defined('CURLOPT_MAX_RECV_SPEED_LARGE')) {
+    define('CURLOPT_MAX_RECV_SPEED_LARGE', 30146);
+  }
 
   class CLI
     {
@@ -262,7 +266,7 @@
           if ($this->fragProxy and $this->proxy)
               $this->setProxy($download['ch'], $this->proxy);
           if ($this->maxSpeed > 0)
-              curl_setopt($process, CURLOPT_MAX_RECV_SPEED_LARGE, $this->maxSpeed);
+              curl_setopt($download['ch'], CURLOPT_MAX_RECV_SPEED_LARGE, $this->maxSpeed);
           curl_multi_add_handle($this->mh, $download['ch']);
           do
             {
@@ -424,6 +428,7 @@
           $xml->registerXPathNamespace("ns", $namespace);
           return $xml;
         }
+
 
       function ParseManifest($cc, $parentManifest)
         {
