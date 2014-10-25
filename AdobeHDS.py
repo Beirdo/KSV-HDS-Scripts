@@ -1,5 +1,6 @@
-#!/usr/bin/env python
-# -*- coding:utf-8 -*-
+#! /usr/bin/python
+# vim:ts=4:sw=4:ai:et:si:sts=4:fileencoding=utf-8
+
 # M6 version 0.1 par k3c
 import binascii
 import struct
@@ -119,28 +120,35 @@ class M6(object):
     def __init__(self, url, dest = '', proxy=None):
         self.status = 'INIT'
         self.url = url
+        self.dest = dest
         self.proxy = proxy
         self.bitrate = 0
         self.duration = 0                        
         self.nbFragments = 0
         self.tagHeaderLen = 11
         self.prevTagSize = 4
-        urlp = urlparse(url)
-        fn = os.path.basename(urlp.path)
-        self.localfilename = \
-            os.path.join(dest, os.path.splitext(fn)[0]) + '.flv'
-        self.localfilename = removeDisallowedFilenameChars(self.localfilename)
         self.urlbootstrap = ''
         self.bootstrapInfoId = ''
-        self.baseUrl = urlunparse((urlp.scheme, urlp.netloc, 
-                                   os.path.dirname(urlp.path), 
-                                            '', '', ''))
+
         if hasUrllib3:
-            self.pm = urllib3.PoolManager(num_pools=100)
-            # self.pm = urllib3.connection_from_url(self.baseUrl)
+            if self.proxy:
+                httpproxy = "http://%s/" % self.proxy
+                self.pm = urllib3.ProxyManager(httpproxy, num_pools=100)
+            else:
+                self.pm = urllib3.PoolManager(num_pools=100)
+        elif self.proxy:
+            proxy_handler = urllib2.ProxyHandler({'http':self.proxy})
+            opener = urllib2.build_opener(proxy_handler)
+            urllib2.install_opener(opener)
+
         self.manifest = self.getManifest(self.url)
-        self.parseManifest()        
-        # self.pm = urllib3.connection_from_url(self.urlbootstrap)
+        manifestVersion = self.manifestVersion()
+        if manifestVersion == 2.0:
+            self.parseManifestV2()
+        elif manifestVersion == 1.0:
+            self.parseManifest()        
+        else:
+            sys.exit(1)
       
     def download(self):
         global QueueUrl, QueueUrlDone, M6Item
@@ -213,6 +221,66 @@ class M6(object):
         self.status = 'GETTING MANIFEST'
         return xml.etree.ElementTree.fromstring(self.getFile(url))
 
+    def manifestVersion(self):
+        root = self.manifest
+        if root.tag == '{http://ns.adobe.com/f4m/2.0}manifest':
+            print "Found v2.0 F4M"
+            return 2.0
+
+        if root.tag == '{http://ns.adobe.com/f4m/1.0}manifest':
+            print "Found v1.0 F4M"
+            return 1.0
+
+        print "Can't find manifest"
+        return 0.0
+
+    def parseManifestV2(self):
+        self.status = 'PARSING MANIFEST'
+        try:
+            root = self.manifest
+
+            # media
+            self.media = None
+            for media in root.findall('{http://ns.adobe.com/f4m/2.0}media'):
+                if int(media.attrib['bitrate']) > self.bitrate:
+                    self.bitrate = int(media.attrib['bitrate'])
+                    suburl = media.attrib['href']
+                    submanifest = self.getManifest(suburl)
+
+            self.url = suburl
+            urlp = urlparse(self.url)
+            fn = os.path.basename(urlp.path)
+            self.localfilename = \
+                os.path.join(self.dest, os.path.splitext(fn)[0]) + '.flv'
+            self.localfilename = removeDisallowedFilenameChars(self.localfilename)
+            self.baseUrl = urlunparse((urlp.scheme, urlp.netloc, 
+                                       os.path.dirname(urlp.path), '', '', ''))
+
+            root = submanifest
+
+            self.media = root.find("{http://ns.adobe.com/f4m/1.0}media")
+
+            self.bootstrapInfoId = self.media.attrib['bootstrapInfoId']
+            self.drmAdditionalHeaderId = self.media.attrib['drmAdditionalHeaderId']
+            self.flvHeader = base64.b64decode(self.media.find("{http://ns.adobe.com/f4m/1.0}metadata").text)
+
+            # Duration
+            self.duration = float(root.find("{http://ns.adobe.com/f4m/1.0}duration").text)
+            # nombre de fragment
+            self.nbFragments = int(math.ceil(self.duration/3))
+            # streamid
+            self.streamid = self.media.attrib['streamId']
+            # Bootstrap URL
+            self.urlbootstrap = self.media.attrib["url"]
+            # urlbootstrap
+            self.urlbootstrap = self.baseUrl + "/" + self.urlbootstrap
+        except Exception, e:
+            print("Not possible to parse the manifest")
+            print e
+            sys.exit(-1)
+        finally:
+            pass
+
     def parseManifest(self):
         self.status = 'PARSING MANIFEST'
         try:
@@ -234,6 +302,15 @@ class M6(object):
                     self.flvHeader = base64.b64decode(media.find("{http://ns.adobe.com/f4m/1.0}metadata").text)
             # Bootstrap URL
             self.urlbootstrap = self.media.attrib["url"]
+        
+            urlp = urlparse(self.url)
+            fn = os.path.basename(urlp.path)
+            self.localfilename = \
+                os.path.join(self.dest, os.path.splitext(fn)[0]) + '.flv'
+            self.localfilename = removeDisallowedFilenameChars(self.localfilename)
+            self.baseUrl = urlunparse((urlp.scheme, urlp.netloc, 
+                                       os.path.dirname(urlp.path), '', '', ''))
+
             # urlbootstrap
             self.urlbootstrap = self.baseUrl + "/" + self.urlbootstrap
         except Exception, e:
@@ -298,11 +375,12 @@ class M6(object):
     def verifyFragment(self, data):
         pos = 0
         fragLen = len(data)
+        print fragLen
         while pos < fragLen:
             pos, boxType, boxSize = self.readBoxHeader(data, pos)
             if boxType == 'mdat':
                 slen = len(data[pos:])
-                # print 'mdat %s' % (slen,)
+                print 'mdat %s' % (slen,)
                 if boxSize and slen == boxSize:
                     return True
                 else:
@@ -315,7 +393,7 @@ class M6(object):
         fragLen = len(data)
         if not self.verifyFragment(data):
             print "Skipping fragment number", fragNum
-            return false
+            return False
         while fragPos < fragLen:
             fragPos, boxType, boxSize = self.readBoxHeader(data, fragPos)
             if boxType == 'mdat':
@@ -354,7 +432,7 @@ def main():
     else:
         NumWorkerThreads = 7
     st = time.time()
-    x = M6(sys.argv[1])
+    x = M6(sys.argv[1], proxy="199.21.149.74:443")
     infos = x.getInfos()
     for item in infos.items():
         print item[0]+' : '+str(item[1])
