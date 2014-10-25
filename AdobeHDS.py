@@ -25,6 +25,8 @@ except ImportError:
     import urllib2
     from urllib2 import HTTPError
     hasUrllib3 = False
+import argparse
+import json
 
 NumWorkerThreads = None
 
@@ -59,7 +61,6 @@ def workerRun():
         QueueUrl.task_done()
     # If we have exited the previous loop with error
     while not QueueUrl.empty():
-        # print 'Ignore fragment', QueueUrl.get()[1].fragNum
         QueueUrl.get()
 
 def worker():
@@ -72,6 +73,8 @@ def worker():
 
 def workerqdRun():
     global QueueUrlDone, M6Item
+    while not QueueUrlDone.empty():
+        print 'Flush fragment', QueueUrlDone.get()[1].fragNum
     currentFrag = 1
     outFile = open(M6Item.localfilename, "wb")
     while currentFrag <= M6Item.nbFragments and M6Item.status == 'DOWNLOADING':
@@ -106,6 +109,8 @@ def workerqd():
         print sys.exc_info()
         M6Item.status = 'STOPPED'
         thread.interrupt_main()
+        while not QueueUrlDone.empty():
+            print 'Flush fragment', QueueUrlDone.get()[1].fragNum
 
 validFilenameChars = "-_.() %s%s" % (string.ascii_letters, string.digits)
 
@@ -117,11 +122,12 @@ def removeDisallowedFilenameChars(filename):
     return ''.join(c for c in cleanedFilename if c in validFilenameChars)              
 
 class M6(object):
-    def __init__(self, url, dest = '', proxy=None):
+    def __init__(self, url, dest = '', proxy=None, maxbitrate=10000):
         self.status = 'INIT'
         self.url = url
         self.dest = dest
         self.proxy = proxy
+        self.maxbitrate = maxbitrate
         self.bitrate = 0
         self.duration = 0                        
         self.nbFragments = 0
@@ -141,14 +147,15 @@ class M6(object):
             opener = urllib2.build_opener(proxy_handler)
             urllib2.install_opener(opener)
 
-        self.manifest = self.getManifest(self.url)
-        manifestVersion = self.manifestVersion()
-        if manifestVersion == 2.0:
-            self.parseManifestV2()
-        elif manifestVersion == 1.0:
-            self.parseManifest()        
-        else:
-            sys.exit(1)
+        if self.url:
+            self.manifest = self.getManifest(self.url)
+            manifestVersion = self.manifestVersion()
+            if manifestVersion == 2.0:
+                self.parseManifestV2()
+            elif manifestVersion == 1.0:
+                self.parseManifest()        
+            else:
+                sys.exit(1)
       
     def download(self):
         global QueueUrl, QueueUrlDone, M6Item
@@ -161,23 +168,18 @@ class M6(object):
             QueueUrl.put((i + 1, GetUrl(fragUrl, i + 1)))
 
         t = threading.Thread(target=workerqd)
-        # t.daemon = True
         t.start()
 
         for i in range(NumWorkerThreads):
             t = threading.Thread(target=worker)
-            # t.daemon = True
             t.start()
 
-        # QueueUrl.join()
-        # QueueUrlDone.join()
         while self.status == 'DOWNLOADING':
             try:
                 time.sleep(3)
             except (KeyboardInterrupt, Exception), e:
                 print sys.exc_info()
                 self.status = 'STOPPED'
-        # self.outFile.close()
         if self.status != 'STOPPED':
             self.status = 'COMPLETED'
 
@@ -199,7 +201,7 @@ class M6(object):
         def getFile(self, url):
             headers = urllib3.make_headers(
                 keep_alive=True,
-                user_agent='Mozilla/5.0 (X11; Ubuntu; Linux i686; rv:17.0) Gecko/20100101 Firefox/17.0',
+                user_agent='Mozilla/5.0 (iPhone; U; CPU iPhone OS 4_3_2 like Mac OS X; en-us) AppleWebKit/533.17.9 (KHTML, like Gecko) Version/5.0.2 Mobile/8H7 Safari/653.18.5',
                 accept_encoding=True)
             r = self.pm.request('GET', url, headers=headers)
             if r.status != 200:
@@ -209,7 +211,7 @@ class M6(object):
     else:
         def getFile(self, url):
             txheaders = {'User-Agent':
-                             'Mozilla/5.0 (X11; Ubuntu; Linux i686; rv:17.0) Gecko/20100101 Firefox/17.0',
+                             'Mozilla/5.0 (iPhone; U; CPU iPhone OS 4_3_2 like Mac OS X; en-us) AppleWebKit/533.17.9 (KHTML, like Gecko) Version/5.0.2 Mobile/8H7 Safari/653.18.5',
                          'Keep-Alive' : '600',
                          'Connection' : 'keep-alive'
                          }
@@ -242,17 +244,18 @@ class M6(object):
             # media
             self.media = None
             for media in root.findall('{http://ns.adobe.com/f4m/2.0}media'):
-                if int(media.attrib['bitrate']) > self.bitrate:
-                    self.bitrate = int(media.attrib['bitrate'])
+                bitrate = int(media.attrib['bitrate'])
+                if bitrate > self.bitrate and bitrate <= self.maxbitrate:
+                    self.bitrate = bitrate
                     suburl = media.attrib['href']
                     submanifest = self.getManifest(suburl)
 
             self.url = suburl
             urlp = urlparse(self.url)
             fn = os.path.basename(urlp.path)
-            self.localfilename = \
-                os.path.join(self.dest, os.path.splitext(fn)[0]) + '.flv'
+            self.localfilename = os.path.splitext(fn)[0] + '.flv'
             self.localfilename = removeDisallowedFilenameChars(self.localfilename)
+            self.localfilename = os.path.join(self.dest, self.localfilename)
             self.baseUrl = urlunparse((urlp.scheme, urlp.netloc, 
                                        os.path.dirname(urlp.path), '', '', ''))
 
@@ -261,7 +264,10 @@ class M6(object):
             self.media = root.find("{http://ns.adobe.com/f4m/1.0}media")
 
             self.bootstrapInfoId = self.media.attrib['bootstrapInfoId']
-            self.drmAdditionalHeaderId = self.media.attrib['drmAdditionalHeaderId']
+            if 'drmAdditionalHeaderId' in self.media.attrib:
+                self.drmAdditionalHeaderId = self.media.attrib['drmAdditionalHeaderId']
+            else:
+                self.drmAdditionalHeaderId = None
             self.flvHeader = base64.b64decode(self.media.find("{http://ns.adobe.com/f4m/1.0}metadata").text)
 
             # Duration
@@ -294,9 +300,10 @@ class M6(object):
             # media
             self.media = None
             for media in root.findall('{http://ns.adobe.com/f4m/1.0}media'):
-                if int(media.attrib['bitrate']) > self.bitrate:
+                bitrate = int(media.attrib['bitrate'])
+                if bitrate > self.bitrate and bitrate <= self.maxbitrate:
                     self.media = media
-                    self.bitrate = int(media.attrib['bitrate'])
+                    self.bitrate = bitrate
                     self.bootstrapInfoId = media.attrib['bootstrapInfoId']
                     self.drmAdditionalHeaderId = media.attrib['drmAdditionalHeaderId']
                     self.flvHeader = base64.b64decode(media.find("{http://ns.adobe.com/f4m/1.0}metadata").text)
@@ -305,9 +312,9 @@ class M6(object):
         
             urlp = urlparse(self.url)
             fn = os.path.basename(urlp.path)
-            self.localfilename = \
-                os.path.join(self.dest, os.path.splitext(fn)[0]) + '.flv'
+            self.localfilename = os.path.splitext(fn)[0] + '.flv'
             self.localfilename = removeDisallowedFilenameChars(self.localfilename)
+            self.localfilename = os.path.join(self.dest, self.localfilename)
             self.baseUrl = urlunparse((urlp.scheme, urlp.netloc, 
                                        os.path.dirname(urlp.path), '', '', ''))
 
@@ -427,17 +434,45 @@ class M6(object):
 
 def main():
     global NumWorkerThreads
-    if len(sys.argv) > 2:
-        NumWorkerThreads = int(sys.argv[2])
-    else:
-        NumWorkerThreads = 7
-    st = time.time()
-    x = M6(sys.argv[1], proxy="199.21.149.74:443")
-    infos = x.getInfos()
-    for item in infos.items():
-        print item[0]+' : '+str(item[1])
-    x.download()
-    print 'Download time:', time.time() - st
+    parser = argparse.ArgumentParser(description="Grab AdobeHDS format files")
+    parser.add_argument("--proxy", dest='proxy', action='store',
+                        help='HTTP Proxy to use')
+    parser.add_argument("--threads", dest='threads', action='store', type=int,
+                        help='number of threads to use', default=7,
+                        choices=range(1, 16))
+    parser.add_argument("urls", metavar='U', nargs='*',
+                        help='manifest URLs to grab from')
+    parser.add_argument("--outdir", dest='outdir', action='store',
+                        help='output directory')
+    parser.add_argument("--stack", dest='stack', action='store',
+                        help='media stack JSON (from CTV)')
+    parser.add_argument("--maxbitrate", dest='maxbitrate', action='store',
+                        help='maximum bitrate (kbit/s) to download', type=int,
+                        default=10000)
+    args = parser.parse_args()
+
+    NumWorkerThreads = args.threads
+    urls = args.urls
+    if not urls:
+        urls = []
+
+    if args.stack:
+        x = M6(None, dest=args.outdir, proxy=args.proxy)
+        stackText = x.getFile(args.stack)
+        stack = json.loads(stackText)
+        items = stack['Items']
+        for item in items:
+            urls.append(args.stack + "/%s/manifest.f4m" % item['Id'])
+
+    for url in urls:
+        st = time.time()
+        x = M6(url, dest=args.outdir, proxy=args.proxy,
+               maxbitrate=args.maxbitrate)
+        infos = x.getInfos()
+        for item in infos.items():
+            print item[0]+' : '+str(item[1])
+        x.download()
+        print 'Download time:', time.time() - st
 
 if __name__ == "__main__":
     main()
