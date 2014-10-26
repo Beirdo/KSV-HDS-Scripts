@@ -5,6 +5,7 @@
 import binascii
 import struct
 import sys
+import traceback
 import os
 import base64 
 import math
@@ -29,10 +30,12 @@ import argparse
 import json
 
 NumWorkerThreads = None
+currChunknum = None
 
 class GetUrl(object):
-    def __init__(self, url, fragnum):
+    def __init__(self, url, chunknum, fragnum):
         self.url = url
+        self.chunkNum = chunknum
         self.fragNum = fragnum
         self.data = None
         self.errCount = 0
@@ -52,6 +55,7 @@ def workerRun():
             QueueUrlDone.put((item.fragNum, item))
         except HTTPError, e:
             print sys.exc_info()
+            traceback.print_exc(file=sys.stdout)
             if item.errCount > 3:
                 M6Item.status = 'STOPPED'
                 # raise
@@ -68,26 +72,25 @@ def worker():
         workerRun()
     except Exception, e:
         print sys.exc_info()
+        traceback.print_exc(file=sys.stdout)
         M6Item.status = 'STOPPED'
         thread.interrupt_main()
 
 def workerqdRun():
-    global QueueUrlDone, M6Item
-    while not QueueUrlDone.empty():
-        print 'Flush fragment', QueueUrlDone.get()[1].fragNum
+    global QueueUrlDone, M6Item, currChunknum
     currentFrag = 1
     outFile = open(M6Item.localfilename, "wb")
     while currentFrag <= M6Item.nbFragments and M6Item.status == 'DOWNLOADING':
         item = QueueUrlDone.get()[1]
-        if currentFrag == item.fragNum:
+        requeue = False
+        if currChunknum == item.chunkNum and currentFrag == item.fragNum:
             # M6Item.verifyFragment(item.data)
             if not M6Item.decodeFragment(item.fragNum, item.data):
-                raise Exception('decodeFrament')
-            M6Item.videoFragment(item.fragNum, item.data, outFile)
+                raise Exception('decodeFragment')
+            M6Item.videoFragment(item.chunkNum, item.fragNum, item.data, outFile)
             print 'Fragment', currentFrag, 'OK'
             currentFrag += 1  
-            requeue = False
-        else:
+        elif currChunknum == item.chunkNum:
             print 'Requeue', item.fragNum
             QueueUrlDone.put((item.fragNum, item))
             requeue = True
@@ -107,6 +110,7 @@ def workerqd():
         workerqdRun()
     except Exception, e:
         print sys.exc_info()
+        traceback.print_exc(file=sys.stdout)
         M6Item.status = 'STOPPED'
         thread.interrupt_main()
         while not QueueUrlDone.empty():
@@ -158,14 +162,14 @@ class M6(object):
                 sys.exit(1)
       
     def download(self):
-        global QueueUrl, QueueUrlDone, M6Item
+        global QueueUrl, QueueUrlDone, M6Item, currChunknum
         M6Item = self
         self.status = 'DOWNLOADING'
         # self.outFile = open(self.localfilename, "wb")
 
         for i in range(self.nbFragments):
             fragUrl = self.urlbootstrap + 'Seg1-Frag'+str(i + 1)
-            QueueUrl.put((i + 1, GetUrl(fragUrl, i + 1)))
+            QueueUrl.put((i + 1, GetUrl(fragUrl, currChunknum, i + 1)))
 
         t = threading.Thread(target=workerqd)
         t.start()
@@ -179,6 +183,7 @@ class M6(object):
                 time.sleep(3)
             except (KeyboardInterrupt, Exception), e:
                 print sys.exc_info()
+                traceback.print_exc(file=sys.stdout)
                 self.status = 'STOPPED'
         if self.status != 'STOPPED':
             self.status = 'COMPLETED'
@@ -328,8 +333,8 @@ class M6(object):
     def stop(self):
         self.status = 'STOPPED'
     
-    def videoFragment(self, fragNum, data, fout):
-        start = M6Item.videostart(fragNum, data)
+    def videoFragment(self, chunkNum, fragNum, data, fout):
+        start = M6Item.videostart(chunkNum, fragNum, data)
         if fragNum == 1:
             self.videoBootstrap(fout)
         fout.write(data[start:])
@@ -346,14 +351,14 @@ class M6(object):
         fout.write(self.flvHeader)
         fout.write(binascii.a2b_hex("00019209"))
 
-    def videostart(self, fragNum, fragData):
+    def videostart(self, chunkNum, fragNum, fragData):
         """
         Trouve le debut de la video dans un fragment
         """
         start = fragData.find("mdat") + 12
         # print "start ", start
         # For all fragment (except frag1)
-        if (fragNum == 1):
+        if fragNum == 1:
             start += 0
         else:
             # Skip 2 FLV tags
@@ -433,7 +438,7 @@ class M6(object):
         return struct.unpack_from(">L", "\0" + data[pos:pos + 3], 0)[0]
 
 def main():
-    global NumWorkerThreads
+    global NumWorkerThreads, currChunknum
     parser = argparse.ArgumentParser(description="Grab AdobeHDS format files")
     parser.add_argument("--proxy", dest='proxy', action='store',
                         help='HTTP Proxy to use')
@@ -449,12 +454,16 @@ def main():
     parser.add_argument("--maxbitrate", dest='maxbitrate', action='store',
                         help='maximum bitrate (kbit/s) to download', type=int,
                         default=10000)
+    parser.add_argument("--jsonout", dest='jsonout', action='store',
+                        help='JSON output file')
     args = parser.parse_args()
 
     NumWorkerThreads = args.threads
     urls = args.urls
     if not urls:
         urls = []
+
+    sections = []
 
     if args.stack:
         x = M6(None, dest=args.outdir, proxy=args.proxy)
@@ -464,15 +473,23 @@ def main():
         for item in items:
             urls.append(args.stack + "/%s/manifest.f4m" % item['Id'])
 
+    currChunknum = 1
     for url in urls:
         st = time.time()
         x = M6(url, dest=args.outdir, proxy=args.proxy,
                maxbitrate=args.maxbitrate)
+        sections.append(os.path.split(x.localfilename)[1])
         infos = x.getInfos()
         for item in infos.items():
             print item[0]+' : '+str(item[1])
         x.download()
         print 'Download time:', time.time() - st
+        currChunknum += 1
+
+    if args.jsonout:
+        files = { 'segments' : sections }
+        with open(args.jsonout, "w") as f:
+            f.write(json.dumps(files))
 
 if __name__ == "__main__":
     main()
