@@ -241,6 +241,20 @@ class M6(object):
         print "Can't find manifest"
         return 0.0
 
+    def parseFilename(self, url):
+        # http://foodnetwork-vh.akamaihd.net/z/733/459/FOOD_TheMain_E1002_,high,highest,medium,low,lowest,_16x9.mp4.csmil/manifest.f4m?
+        m = re.match(r'^https?://[^/]+?/z/\d+/\d+/(.*?),.*,(.*?\.mp4).*$', url)
+        if m:
+            return m.group(1) + m.group(2)
+
+        # http://foodnetwork-vh.akamaihd.net/z/,1006/187/FOOD_ChoppedCan_E1005.mp4,.csmil/manifest.f4m?
+        m = re.match(r'^https?://[^/]+?/z/,\d+/\d+/(.*?\.mp4).*$', url)
+        if m:
+            return m.group(1)
+
+        urlp = urlparse(url)
+        return urlp.path
+
     def parseManifestV2(self):
         self.status = 'PARSING MANIFEST'
         try:
@@ -257,7 +271,7 @@ class M6(object):
 
             self.url = suburl
             urlp = urlparse(self.url)
-            fn = os.path.basename(urlp.path)
+            fn = os.path.basename(self.parseFilename(self.url))
             self.localfilename = os.path.splitext(fn)[0] + '.flv'
             self.localfilename = removeDisallowedFilenameChars(self.localfilename)
             self.localfilename = os.path.join(self.dest, self.localfilename)
@@ -269,6 +283,7 @@ class M6(object):
             self.media = root.find("{http://ns.adobe.com/f4m/1.0}media")
 
             self.bootstrapInfoId = self.media.attrib['bootstrapInfoId']
+            print xml.etree.ElementTree.tostring(self.media)
             if 'drmAdditionalHeaderId' in self.media.attrib:
                 self.drmAdditionalHeaderId = self.media.attrib['drmAdditionalHeaderId']
             else:
@@ -310,13 +325,16 @@ class M6(object):
                     self.media = media
                     self.bitrate = bitrate
                     self.bootstrapInfoId = media.attrib['bootstrapInfoId']
-                    self.drmAdditionalHeaderId = media.attrib['drmAdditionalHeaderId']
+                    if 'drmAdditionalHeaderId' in media.attrib:
+                        self.drmAdditionalHeaderId = media.attrib['drmAdditionalHeaderId']
+                    else:
+                        self.drmAdditionalHeaderId = None
                     self.flvHeader = base64.b64decode(media.find("{http://ns.adobe.com/f4m/1.0}metadata").text)
             # Bootstrap URL
             self.urlbootstrap = self.media.attrib["url"]
         
             urlp = urlparse(self.url)
-            fn = os.path.basename(urlp.path)
+            fn = os.path.basename(self.parseFilename(self.url))
             self.localfilename = os.path.splitext(fn)[0] + '.flv'
             self.localfilename = removeDisallowedFilenameChars(self.localfilename)
             self.localfilename = os.path.join(self.dest, self.localfilename)
@@ -467,7 +485,9 @@ def main():
 
     if args.stack:
         x = M6(None, dest=args.outdir, proxy=args.proxy)
+        print args.stack
         stackText = x.getFile(args.stack)
+        print stackText
         stack = json.loads(stackText)
         items = stack['Items']
         for item in items:
