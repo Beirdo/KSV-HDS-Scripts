@@ -86,10 +86,11 @@ def workerqdRun():
         if currChunknum == item.chunkNum and currentFrag == item.fragNum:
             # M6Item.verifyFragment(item.data)
             if not M6Item.decodeFragment(item.fragNum, item.data):
-                raise Exception('decodeFragment')
-            M6Item.videoFragment(item.chunkNum, item.fragNum, item.data, outFile)
-            print 'Fragment', currentFrag, 'OK'
-            currentFrag += 1  
+                M6Item.status = 'FINISHED'
+            else:
+                M6Item.videoFragment(item.chunkNum, item.fragNum, item.data, outFile)
+                print 'Fragment', currentFrag, 'OK'
+                currentFrag += 1  
         elif currChunknum == item.chunkNum:
             print 'Requeue', item.fragNum
             QueueUrlDone.put((item.fragNum, item))
@@ -104,6 +105,7 @@ def workerqdRun():
     else:
         while not QueueUrlDone.empty():
             print 'Ignore fragment', QueueUrlDone.get()[1].fragNum
+        M6Item.status = 'COMPLETED'
 
 def workerqd():
     try:
@@ -442,10 +444,10 @@ class M6(object):
             # time.sleep(1)
             if packetType in (10, 11):
                 print "This stream is encrypted with Akamai DRM. Decryption of such streams isn't currently possible with this script."
-                return False
+                raise Exception('Akamai DRM')
             if packetType in (40, 41):
                 print "This stream is encrypted with FlashAccess DRM. Decryption of such streams isn't currently possible with this script."
-                return False
+                raise Exception('FlashAccess DRM')
             fragPos += totalTagLen
         return True
 
@@ -505,11 +507,15 @@ def main():
         x.download()
         print 'Download time:', time.time() - st
         currChunknum += 1
+        if x.status == 'STOPPED':
+            sys.exit(1)
 
     if args.jsonout:
         files = { 'segments' : sections }
         with open(args.jsonout, "w") as f:
             f.write(json.dumps(files))
+
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()
