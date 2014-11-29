@@ -67,14 +67,19 @@ def workerRun():
     while not QueueUrl.empty():
         QueueUrl.get()
 
-def worker():
+def worker(errQueue):
+    error = None
     try:
         workerRun()
-    except Exception, e:
+    except Exception as e:
         print sys.exc_info()
         traceback.print_exc(file=sys.stdout)
+        error = str(e)
         M6Item.status = 'STOPPED'
         thread.interrupt_main()
+
+    if error:
+        errQueue.put(error)
 
 def workerqdRun():
     global QueueUrlDone, M6Item, currChunknum
@@ -107,16 +112,21 @@ def workerqdRun():
             print 'Ignore fragment', QueueUrlDone.get()[1].fragNum
         M6Item.status = 'COMPLETED'
 
-def workerqd():
+def workerqd(errQueue):
+    error = None
     try:
         workerqdRun()
-    except Exception, e:
+    except Exception as e:
         print sys.exc_info()
+        error = str(e)
         traceback.print_exc(file=sys.stdout)
         M6Item.status = 'STOPPED'
         thread.interrupt_main()
         while not QueueUrlDone.empty():
             print 'Flush fragment', QueueUrlDone.get()[1].fragNum
+
+    if error:
+        errQueue.put(error)
 
 validFilenameChars = "-_.() %s%s" % (string.ascii_letters, string.digits)
 
@@ -141,6 +151,7 @@ class M6(object):
         self.prevTagSize = 4
         self.urlbootstrap = ''
         self.bootstrapInfoId = ''
+        self.error = None
 
         if hasUrllib3:
             if self.proxy:
@@ -159,9 +170,9 @@ class M6(object):
             if manifestVersion == 2.0:
                 self.parseManifestV2()
             elif manifestVersion == 1.0:
-                self.parseManifest()        
+                self.parseManifestV1()        
             else:
-                sys.exit(1)
+                self.error = "Unknown manifest version"
       
     def download(self):
         global QueueUrl, QueueUrlDone, M6Item, currChunknum
@@ -173,11 +184,13 @@ class M6(object):
             fragUrl = self.urlbootstrap + 'Seg1-Frag'+str(i + 1)
             QueueUrl.put((i + 1, GetUrl(fragUrl, currChunknum, i + 1)))
 
-        t = threading.Thread(target=workerqd)
+        errQueue = Queue.Queue()
+
+        t = threading.Thread(target=workerqd, args=(errQueue,))
         t.start()
 
         for i in range(NumWorkerThreads):
-            t = threading.Thread(target=worker)
+            t = threading.Thread(target=worker, args=(errQueue,))
             t.start()
 
         while self.status == 'DOWNLOADING':
@@ -187,8 +200,15 @@ class M6(object):
                 print sys.exc_info()
                 traceback.print_exc(file=sys.stdout)
                 self.status = 'STOPPED'
+
         if self.status != 'STOPPED':
             self.status = 'COMPLETED'
+
+        try:
+            error = errQueue.get(False)
+            return error
+        except Exception:
+            return None
 
     def getInfos(self):
         infos = {}
@@ -212,8 +232,8 @@ class M6(object):
                 accept_encoding=True)
             r = self.pm.request('GET', url, headers=headers)
             if r.status != 200:
-                print 'Error downloading', r.status, url
-                # sys.exit(1)
+                self.error = 'Error downloading: %s, %s' % (r.status, url)
+                print self.error
             return r.data
     else:
         def getFile(self, url):
@@ -302,15 +322,12 @@ class M6(object):
             self.urlbootstrap = self.media.attrib["url"]
             # urlbootstrap
             self.urlbootstrap = self.baseUrl + "/" + self.urlbootstrap
-        except Exception, e:
-            print("Not possible to parse the manifest")
-            print e
+        except Exception as e:
+            self.error = "Not possible to parse the manifest: %s" % e
+            print self.error
             traceback.print_exc()
-            sys.exit(-1)
-        finally:
-            pass
 
-    def parseManifest(self):
+    def parseManifestV1(self):
         self.status = 'PARSING MANIFEST'
         try:
             root = self.manifest
@@ -346,10 +363,10 @@ class M6(object):
 
             # urlbootstrap
             self.urlbootstrap = self.baseUrl + "/" + self.urlbootstrap
-        except Exception, e:
-            print("Not possible to parse the manifest")
-            print e
-            sys.exit(-1)
+        except Exception as e:
+            self.error = "Not possible to parse the manifest: %s" % e
+            print self.error
+            traceback.print_exc()
 
     def stop(self):
         self.status = 'STOPPED'
@@ -497,24 +514,35 @@ def main():
             urls.append(args.stack + "/%s/manifest.f4m" % item['Id'])
 
     currChunknum = 1
+    error = None
     for url in urls:
         st = time.time()
         x = M6(url, dest=args.outdir, proxy=args.proxy,
                maxbitrate=args.maxbitrate)
+        if x.error:
+            error = x.error
+            break
         sections.append(os.path.split(x.localfilename)[1])
         infos = x.getInfos()
         for item in infos.items():
             print item[0]+' : '+str(item[1])
-        x.download()
+        error = x.download()
         print 'Download time:', time.time() - st
         currChunknum += 1
-        if x.status == 'STOPPED':
-            sys.exit(1)
+        if x.status == 'STOPPED' and not error:
+            error = "Download stopped"
+        if error:
+            break
 
     if args.jsonout:
         files = { 'segments' : sections }
+        if error:
+            files['error'] = error
         with open(args.jsonout, "w") as f:
             f.write(json.dumps(files))
+
+    if error:
+        sys.exit(1)
 
     sys.exit(0)
 
