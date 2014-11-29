@@ -305,6 +305,7 @@ class M6(object):
         except Exception, e:
             print("Not possible to parse the manifest")
             print e
+            traceback.print_exc()
             sys.exit(-1)
         finally:
             pass
@@ -468,7 +469,7 @@ def main():
     parser.add_argument("urls", metavar='U', nargs='*',
                         help='manifest URLs to grab from')
     parser.add_argument("--outdir", dest='outdir', action='store',
-                        help='output directory')
+                        help='output directory', default='./')
     parser.add_argument("--stack", dest='stack', action='store',
                         help='media stack JSON (from CTV)')
     parser.add_argument("--maxbitrate", dest='maxbitrate', action='store',
