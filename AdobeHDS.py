@@ -294,7 +294,10 @@ class M6(object):
             self.url = suburl
             urlp = urlparse(self.url)
             fn = os.path.basename(self.parseFilename(self.url))
-            self.localfilename = os.path.splitext(fn)[0] + '.flv'
+            self.localfilename = os.path.splitext(fn)[0]
+            if self.localfilename.endswith('.mp4'):
+                self.localfilename = os.path.splitext(self.localfilename)[0]
+            self.localfilename = self.localfilename + '.flv'
             self.localfilename = removeDisallowedFilenameChars(self.localfilename)
             self.localfilename = os.path.join(self.dest, self.localfilename)
             self.baseUrl = urlunparse((urlp.scheme, urlp.netloc, 
@@ -355,7 +358,10 @@ class M6(object):
         
             urlp = urlparse(self.url)
             fn = os.path.basename(self.parseFilename(self.url))
-            self.localfilename = os.path.splitext(fn)[0] + '.flv'
+            self.localfilename = os.path.splitext(fn)[0]
+            if self.localfilename.endswith('.mp4'):
+                self.localfilename = os.path.splitext(self.localfilename)[0]
+            self.localfilename = self.localfilename + '.flv'
             self.localfilename = removeDisallowedFilenameChars(self.localfilename)
             self.localfilename = os.path.join(self.dest, self.localfilename)
             self.baseUrl = urlunparse((urlp.scheme, urlp.netloc, 
